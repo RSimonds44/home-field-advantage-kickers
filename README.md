@@ -11,13 +11,19 @@ A causal analysis of whether crowd density affects visiting kicker performance i
 1. Ensure **R** and **RStudio** are installed on your system.  
 2. Clone the repository:
 
-```git clone https://github.com/RSimonds44/home-field-advantage-kickers.git```
-```cd home-field-advantage-kickers```
+```
+git clone https://github.com/RSimonds44/home-field-advantage-kickers.git
+```
+```
+cd home-field-advantage-kickers
+```
 
 3. Open **econ-464.Rproj** in RStudio to load the project environment.
 4. Install required packages (if needed):
 
-```install.packages(c("cfbfastR", "tidyverse", "fixest"))```
+```
+install.packages(c("cfbfastR", "tidyverse", "fixest"))
+```
 
 6. Open **code/analysis.qmd** and render it to reproduce the data pull, regression models, and figures.
 ## Results
