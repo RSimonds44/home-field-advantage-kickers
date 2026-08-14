@@ -1,0 +1,196 @@
+---
+title: "Data Collection"
+format: html
+editor: source
+---
+
+## Main Data Collection Source
+
+### Load Libraries 
+
+```{r}
+library(tidyverse)
+library(cfbfastR)
+library(writexl)
+library(fixest)
+library(modelsummary)
+library(knitr)
+```
+
+### Main Code
+
+```{r}
+# 1. Load Play-by-Play for 2020 and 2021
+pbp_raw <- load_cfb_pbp(2020:2021)
+
+# 2. Filter for kicking plays
+kicking_data <- pbp_raw %>%
+  filter(play_type %in% c("Field Goal Good", "Field Goal Missed", 
+                         "Extra Point Good", "Extra Point Missed")) |> 
+  mutate(
+    # Create the binary outcome (Success = 1)
+    success = ifelse(str_detect(play_type, "Good"), 1, 0),
+    
+    # Calculate distance: 
+    # Field goals are usually snapped from 7 yards back + 10 yards for endzone = 17
+    kick_dist = ifelse(str_detect(play_type, "Field Goal"), 
+                       yards_to_goal + 17, 19), 
+    
+    # Year dummy
+    year_2020 = ifelse(year == 2020, 1, 0)
+  )
+
+# 3. Get Game Metadata (Info & Weather)
+years <- c(2020, 2021)
+game_info_raw <- years %>%
+  purrr::map_df(~cfbfastR::cfbd_game_info(year = .x))
+
+game_weather_raw <- years %>%
+  purrr::map_df(~cfbfastR::cfbd_game_weather(year = .x))
+
+# --- THE SAFE FIX ---
+if (nrow(game_info_raw) > 0) {
+  colnames(game_info_raw)[1] <- "game_id"
+  game_info_clean <- game_info_raw %>%
+    mutate(game_id = as.character(game_id)) %>%
+    select(game_id, away_team, home_team, attendance)
+} else {
+  stop("Game Info is empty! Check your API key or internet connection.")
+}
+
+if (nrow(game_weather_raw) > 0) {
+  colnames(game_weather_raw)[1] <- "game_id"
+  game_weather_clean <- game_weather_raw %>%
+    mutate(game_id = as.character(game_id)) %>%
+    select(game_id, 
+           temp = contains("temperature"), 
+           wind = contains("wind_speed"))
+} else {
+  game_weather_clean <- data.frame(game_id = character(), temp = numeric(), wind = numeric())
+  warning("Weather data was empty. Proceeding without weather controls.")
+}
+
+# Merge the metadata tables together
+game_metadata <- game_info_clean %>%
+  left_join(game_weather_clean, by = "game_id")
+
+# 4. Join and use the renamed columns (.y)
+final_data <- kicking_data %>%
+  mutate(game_id = as.character(game_id)) %>%
+  left_join(game_metadata, by = "game_id") %>%
+  mutate(
+    # Use away_team.y because R renamed it during the join
+    is_visitor = ifelse(pos_team == away_team.y, 1, 0)
+  )
+
+# Verify the results
+print("Quick check of the visitor logic:")
+final_data %>% 
+  select(pos_team, away_team.y, is_visitor) %>% 
+  head(10)
+```
+
+
+### Summary Statistics
+
+```{r}
+summary_results <- final_data %>%                ## ADD COLUMN FOR DIFFERENCE IN YEARS 
+  filter(!is.na(away_team.y)) |> 
+  # 1. Create a clear "Status" column
+  mutate(kicker_status = ifelse(pos_team == away_team.y, "Visitor", "Home"),
+         year = ifelse(year == 2020, "2020 (Control)", "2021 (Full Capacity)")) |> 
+  
+  # 2. Group by both Year and Status
+  group_by(year, kicker_status) %>%
+
+  # 3. Calculate the metrics for your hypothesis
+  summarise(
+    total_attempts = n(),
+    success_rate = round(mean(success * 100, na.rm = TRUE), 2),
+    avg_attendance = round(mean(attendance, na.rm = TRUE), 0),
+    .groups = "drop"
+  )
+
+# View the final table
+print(summary_results) |>
+  kable()
+```
+
+
+### Regression Models
+
+```{r}
+# Updated Table Code
+modelsummary(
+  list("Baseline" = reg1, "Controls" = reg2, "Full FE Model" = reg3),
+  # We explicitly define the statistics to keep: Observations, R2, and Adjusted R2
+  gof_map = list(
+    list("raw" = "nobs", "clean" = "Observations (N)", "fmt" = 0),
+    list("raw" = "r.squared", "clean" = "R-squared", "fmt" = 3),
+    list("raw" = "adj.r.squared", "clean" = "Adj. R-squared", "fmt" = 3)
+  ),
+  coef_map = var_labels,
+  stars = TRUE,
+  add_rows = data.frame(
+    term = "Kicker Fixed Effects",
+    "Baseline" = "No",
+    "Controls" = "No",
+    "Full FE Model" = "Yes"
+  ),
+  title = "Table 2: Regression Estimates of Kicking Success",
+  notes = "Robust standard errors in parentheses. + p < 0.1, * p < 0.5, ** p < 0.01, *** p < 0.001",
+  output = "table_preview.html"
+)
+```
+
+
+### Visualization
+
+```{r}
+library(modelsummary)
+library(ggplot2)
+
+# 1. Map labels
+plot_labels <- c(
+  "is_visitor" = "Visitor Status",
+  "attendance" = "Attendance",
+  "kick_dist" = "Kick Distance (Yards)",
+  "is_visitor:attendance" = "Visitor x Attendance"
+)
+
+# 2. Generate the plot with centered scaling
+modelplot(reg3, coef_map = plot_labels) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", size = 1) +
+  # This line forces the x-axis to center around 0
+  coord_cartesian(xlim = c(-0.06, 0.02)) + 
+  theme_minimal() +
+  labs(
+    title = "Figure 1: Marginal Effects on Kicking Success",
+    subtitle = "Point estimates with 95% Confidence Intervals",
+    x = "Impact on Success Probability (Percentage Points)",
+    y = ""
+  ) +
+  theme(plot.title = element_text(face = "bold"))
+
+
+library(marginaleffects)
+library(ggplot2)
+
+# We set vcov = FALSE to bypass the fixed-effects error 
+# and focus on the trend lines themselves
+plot_predictions(reg3, 
+                 condition = c("attendance", "is_visitor"), 
+                 vcov = FALSE) +
+  scale_color_manual(values = c("blue", "orange"), 
+                     labels = c("Home", "Visitor")) +
+  labs(
+    title = "Figure 2: Impact of Attendance on Kicking Success",
+    subtitle = "Predicted probabilities by Home vs. Visitor status",
+    x = "Stadium Attendance",
+    y = "Predicted Success Probability",
+    color = "Status"
+  ) +
+  theme_minimal()
+```
+
+
